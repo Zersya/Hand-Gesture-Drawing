@@ -190,7 +190,7 @@
         }
 
         // Smoothing parameters
-        const smoothingFactor = 0.5; // Adjust as needed (0.0 - no smoothing, 1.0 - no movement)
+        const smoothingFactor = 0.35; // Adjust as needed (0.0 - no smoothing, 1.0 - no movement)
         let smoothedX = 0;
         let smoothedY = 0;
 
@@ -259,19 +259,23 @@
                     // Get the appropriate cursor for this user
                     const userCursor = getOrCreateCursor(data.user_id);
 
-                    // Update cursor position using the corrected function
+                    // Update cursor position
                     updateCursorPosition(userCursor, index.x, index.y);
 
                     // Only process drawing for the current user
                     if (data.user_id === socket.id) {
                         const canvasPos = getCanvasPosition(index.x, index.y);
 
-                        const distance = Math.hypot(index.x - middle.x, index.y - middle.y);
-                        const isErasing = distance < 0.05;
+                        // Improved Erasing Logic
+                        const isErasing = hand.index_up && hand.middle_up && !hand.pinky_up;
 
-                        ctx.globalCompositeOperation = isErasing ? 'destination-out' : 'source-over';
-                        ctx.lineWidth = isErasing ? 20 : 2;
                         status.textContent = isErasing ? 'Erasing mode' : 'Drawing mode';
+
+                        if (!hand.index_up) {
+                            isDrawing = false;
+                            return;
+                        }
+
 
                         if (!isDrawing) {
                             isDrawing = true;
@@ -282,6 +286,11 @@
                             ctx.moveTo(lastX, lastY);
                         } else {
                             const smoothedPos = smoothPosition(canvasPos.x, canvasPos.y);
+
+                            // Set drawing properties here for consistency
+                            ctx.globalCompositeOperation = isErasing ? 'destination-out' : 'source-over';
+                            ctx.lineWidth = isErasing ? 20 : 2; 
+
                             ctx.lineTo(smoothedPos.x, smoothedPos.y);
                             ctx.stroke();
 
@@ -297,6 +306,9 @@
                             lastX = smoothedPos.x;
                             lastY = smoothedPos.y;
                         }
+                    } else {
+                        // Update cursor position for other users
+                        updateCursorPosition(userCursor, index.x, index.y);
                     }
                 } else {
                     if (data.user_id === socket.id) {
@@ -336,11 +348,13 @@
         // Clear canvas
         document.getElementById('clear-canvas').addEventListener('click', () => {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
+            isDrawing = false;
             socket.emit('clear', { room });
         });
 
         socket.on('clear_broadcast', (data) => {
             if (data.room === room) {
+                isDrawing = false;
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
             }
         });

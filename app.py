@@ -31,17 +31,35 @@ rooms = {}
 camera_status = {}  # Changed to store user_id: status
 cameras = {}  # Track camera instances per user
 
+def is_index_finger_up(hand_landmarks):
+    return hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP].y < hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_DIP].y
+
+def is_middle_finger_up(hand_landmarks):
+    return hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP].y < hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_DIP].y
+
+def is_pinky_finger_up(hand_landmarks):
+    return hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_TIP].y < hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_MCP].y
+
 def process_hand_landmarks(hand_landmarks):
     try:
         index_tip = {
-            'x': float(hand_landmarks.landmark[8].x),
-            'y': float(hand_landmarks.landmark[8].y)
+            'x': float(hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP].x),
+            'y': float(hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP].y)
         }
         middle_tip = {
-            'x': float(hand_landmarks.landmark[12].x),
-            'y': float(hand_landmarks.landmark[12].y)
+            'x': float(hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP].x),
+            'y': float(hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP].y)
         }
-        return {'index': index_tip, 'middle': middle_tip}
+        pinky_tip = {
+            'x': float(hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_TIP].x),
+            'y': float(hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_TIP].y)
+        }
+        
+        index_up = is_index_finger_up(hand_landmarks)
+        middle_up = is_middle_finger_up(hand_landmarks)
+        pinky_up = is_pinky_finger_up(hand_landmarks)
+        
+        return {'index': index_tip, 'middle': middle_tip, 'index_up': index_up, 'middle_up': middle_up, 'pinky': pinky_tip, 'pinky_up': pinky_up}
     except Exception as e:
         logger.error(f"Error processing hand landmarks: {str(e)}")
         return None
