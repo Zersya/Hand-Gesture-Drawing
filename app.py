@@ -14,7 +14,11 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")  # Changed async_mode
+socketio = SocketIO(app, 
+                   cors_allowed_origins="*", 
+                   async_mode="threading",  
+                   ping_timeout=60,
+                   ping_interval=25)
 
 # Initialize MediaPipe Hands
 mp_hands = mp.solutions.hands
@@ -171,6 +175,22 @@ def on_leave(data):
                 del cameras[request.sid]
         logger.info(f"User {request.sid} left room {room}")
 
+@socketio.on('disconnect')
+def on_disconnect():
+    for room_id, participants in list(rooms.items()):
+        if request.sid in participants:
+            rooms[room_id].remove(request.sid)
+            if len(rooms[room_id]) == 0:
+                del rooms[room_id]
+            if request.sid in camera_status:
+                camera_status[request.sid] = False
+                if request.sid in cameras:
+                    cameras[request.sid].release()
+                    del cameras[request.sid]
+                del camera_status[request.sid]
+            socketio.emit('join_response', {'count': len(rooms.get(room_id, set()))}, room=room_id)
+            logger.info(f"User {request.sid} disconnected from room {room_id}")
+
 @socketio.on('toggle_camera')
 def toggle_camera(data):
     room = data.get('room')
@@ -189,4 +209,8 @@ def on_clear(data):
 
 if __name__ == '__main__':
     logger.info("Starting application...")
-    socketio.run(app, host='0.0.0.0', port=8000, debug=True) # Changed
+    socketio.run(app, 
+                host='0.0.0.0', 
+                port=8000,
+                debug=False,  
+                allow_unsafe_werkzeug=True)  

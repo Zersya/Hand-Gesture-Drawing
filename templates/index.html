@@ -359,6 +359,11 @@
             }
         });
 
+        // Handle tab/browser close
+        window.addEventListener('beforeunload', () => {
+            socket.disconnect();
+        });
+
         // Toggle camera
         document.getElementById('toggle-camera').addEventListener('click', () => {
             socket.emit('toggle_camera', { room });
