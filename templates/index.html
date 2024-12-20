@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hand Gesture Drawing</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
     <style>
         body {
             font-family: 'Arial', sans-serif;
@@ -42,9 +45,44 @@
         }
         #video-feed {
             width: 100%;
+            height: 100%;
+            transform: scaleX(-1);
             border-radius: 8px;
+            background-color: #000;
+            object-fit: cover;
+        }
+
+        .video-container {
+            position: relative;
+            width: 480px;
+            height: 360px;
+            background-color: #000;
+            border-radius: 8px;
+            overflow: hidden;
             box-shadow: 0 4px 6px rgba(0,0,0,0.1);
         }
+
+        .camera-status {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            padding: 5px 10px;
+            background-color: rgba(0, 0, 0, 0.5);
+            color: white;
+            border-radius: 4px;
+            font-size: 12px;
+            z-index: 10;
+        }
+
+        #hand-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+
         #drawing-canvas {
             width: 100%;
             height: 360px;
@@ -114,7 +152,9 @@
         </div>
         <div class="workspace">
             <div class="video-container">
-                <img id="video-feed" alt="Video feed">
+                <video id="video-feed" width="480" height="360" autoplay playsinline></video>
+                <canvas id="hand-canvas" style="display: none;"></canvas>
+                <div class="camera-status">Camera Off</div>
             </div>
             <div class="canvas-container">
                 <canvas id="drawing-canvas"></canvas>
@@ -131,23 +171,175 @@
     </div>
 
     <script>
-        const socket = io();
+        // Check if MediaPipe scripts are loaded
+        function checkMediaPipeLoaded() {
+            return new Promise((resolve, reject) => {
+                let attempts = 0;
+                const maxAttempts = 10;
+                
+                const check = () => {
+                    if (typeof Hands !== 'undefined' && typeof Camera !== 'undefined') {
+                        console.log('MediaPipe scripts loaded');
+                        resolve(true);
+                    } else if (attempts < maxAttempts) {
+                        attempts++;
+                        console.log('Waiting for MediaPipe scripts to load...');
+                        setTimeout(check, 500);
+                    } else {
+                        reject(new Error('MediaPipe scripts failed to load'));
+                    }
+                };
+                
+                check();
+            });
+        }
+
+        const socket = io({
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            reconnectionAttempts: 5
+        });
+        
         let isDrawing = false;
         let lastX = 0;
         let lastY = 0;
         let room = window.location.hash.slice(1) || Math.random().toString(36).substring(7);
         window.location.hash = room;
-        console.log('Room ID:', room);
-
+        
+        // DOM Elements
+        const videoElement = document.getElementById('video-feed');
+        const handCanvas = document.getElementById('hand-canvas');
+        const handCtx = handCanvas.getContext('2d');
         const canvas = document.getElementById('drawing-canvas');
         const ctx = canvas.getContext('2d');
         const cursor = document.getElementById('cursor');
         const status = document.getElementById('status');
-        const videoFeed = document.getElementById('video-feed');
         const cursorsContainer = document.getElementById('cursors-container');
-        const userCursors = new Map(); // Store cursors for other users
+        const userCursors = new Map();
+        
+        let camera = null;
+        let hands = null;
+        let isCameraOn = false;
+
+        // Smoothing parameters
+        const smoothingFactor = 0.85;
+        let smoothedX = 0;
+        let smoothedY = 0;
+
+        function initializeSmoothedPosition(x, y) {
+            smoothedX = x;
+            smoothedY = y;
+        }
+
+        function smoothPosition(x, y) {
+            smoothedX = smoothingFactor * x + (1 - smoothingFactor) * smoothedX;
+            smoothedY = smoothingFactor * y + (1 - smoothingFactor) * smoothedY;
+            return { x: smoothedX, y: smoothedY };
+        }
+
+        async function initializeMediaPipe() {
+            try {
+                console.log('Initializing MediaPipe...');
+                
+                await checkMediaPipeLoaded();
+
+                hands = new Hands({
+
+                    locateFile: (file) => {
+                        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+                    }
+                });
+
+                hands.setOptions({
+                    maxNumHands: 2,
+                    modelComplexity: 1,
+                    minDetectionConfidence: 0.6,
+                    minTrackingConfidence: 0.6
+                });
+
+                hands.onResults(onResults);
+
+                if (typeof Camera === 'undefined') {
+                    throw new Error('MediaPipe Camera not loaded');
+                }
+
+                camera = new Camera(videoElement, {
+                    onFrame: async () => {
+                        if (isCameraOn && hands) {
+                            try {
+                                await hands.send({image: videoElement});
+                            } catch (error) {
+                                console.error('Error processing frame:', error);
+                            }
+                        }
+                    },
+                    width: 480,
+                    height: 360
+                });
+
+                console.log('MediaPipe initialized successfully');
+                return true;
+            } catch (error) {
+                console.error('Error initializing MediaPipe:', error);
+                status.textContent = 'Error initializing camera system: ' + error.message;
+                return false;
+            }
+        }
+
+        function isIndexFingerUp(landmarks) {
+            return landmarks[8].y < landmarks[6].y;
+        }
+
+        function isMiddleFingerUp(landmarks) {
+            return landmarks[12].y < landmarks[10].y;
+        }
+
+        function isPinkyFingerUp(landmarks) {
+            return landmarks[20].y < landmarks[18].y;
+        }
+
+        function onResults(results) {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const hand = results.multiHandLandmarks[0];
+                
+                const indexUp = isIndexFingerUp(hand);
+                const middleUp = isMiddleFingerUp(hand);
+                const pinkyUp = isPinkyFingerUp(hand);
+
+                // Update own cursor with flipped coordinates
+                const userCursor = getOrCreateCursor(socket.id);
+                updateCursorPosition(userCursor, hand[8].x, hand[8].y);
+
+                const handData = {
+                    room: room,
+                    user_id: socket.id,
+                    landmarks: [{
+                        index: {
+                            x: hand[8].x,
+                            y: hand[8].y
+                        },
+                        middle: {
+                            x: hand[12].x,
+                            y: hand[12].y
+                        },
+                        index_up: indexUp,
+                        middle_up: middleUp,
+                        pinky_up: pinkyUp
+                    }]
+                };
+
+                socket.emit('hand_position', handData);
+                processHandPosition(handData);
+            } else {
+                isDrawing = false;
+                cursor.style.display = 'none';
+                status.textContent = 'Hand not detected';
+            }
+        }
 
         function getOrCreateCursor(userId) {
+
             if (userId === socket.id) return cursor;
             
             if (!userCursors.has(userId)) {
@@ -169,9 +361,8 @@
 
         // Function to calculate position relative to video feed and map to canvas
         function getCanvasPosition(videoX, videoY) {
-            // Simply map normalized coordinates (0-1) directly to canvas dimensions
             return {
-                x: videoX * canvas.width,
+                x: (1 - videoX) * canvas.width, // Flip the x coordinate
                 y: videoY * canvas.height
             };
         }
@@ -179,155 +370,134 @@
         // Function to update cursor position
         function updateCursorPosition(cursor, videoX, videoY) {
             const canvasRect = canvas.getBoundingClientRect();
-
-            // Calculate cursor position directly relative to the canvas
-            const cursorX = (videoX * canvasRect.width);
+            const cursorX = ((1 - videoX) * canvasRect.width); // Flip the x coordinate
             const cursorY = (videoY * canvasRect.height);
-
             cursor.style.left = `${cursorX}px`;
             cursor.style.top = `${cursorY}px`;
             cursor.style.display = 'block';
         }
 
-        // Smoothing parameters
-        const smoothingFactor = 0.85;
-        let smoothedX = 0;
-        let smoothedY = 0;
 
-        function initializeSmoothedPosition(x, y) {
-            smoothedX = x;
-            smoothedY = y;
-        }
 
-        function smoothPosition(x, y) {
-            smoothedX = smoothingFactor * x + (1 - smoothingFactor) * smoothedX;
-            smoothedY = smoothingFactor * y + (1 - smoothingFactor) * smoothedY;
-            
-            return { x: smoothedX, y: smoothedY };
-        }
+
 
         // Initialize canvas properties
         function initCanvas() {
-            canvas.width = canvas.offsetWidth;
-            canvas.height = canvas.offsetHeight;
-            ctx.strokeStyle = '#000';
-            ctx.lineWidth = 2;
-            ctx.lineCap = 'round';
-            ctx.lineJoin = 'round';
-        }
+            try {
+                // Get the container width and height
+                const container = canvas.parentElement;
+                const containerStyle = window.getComputedStyle(container);
+                const width = parseInt(containerStyle.width, 10);
+                const height = parseInt(containerStyle.height, 10);
 
-        // Call initCanvas on load and resize
-        initCanvas();
-        window.addEventListener('resize', initCanvas);
-
-        document.getElementById('room-id').textContent = room;
-        socket.emit('join', { room });
-
-        socket.on('connect', () => {
-            console.log('Socket connected with sid:', socket.id);
-            updateVideoFeed();
-        });
-
-        function updateVideoFeed() {
-            if (socket.id) {
-                videoFeed.src = `/video_feed/${room}/${socket.id}`;
+                // Set canvas size
+                canvas.width = width;
+                canvas.height = height;
+                
+                // Set canvas properties
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 2;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                
+                console.log('Canvas initialized with dimensions:', width, 'x', height);
+                return true;
+            } catch (error) {
+                console.error('Error initializing canvas:', error);
+                status.textContent = 'Error initializing canvas';
+                return false;
             }
         }
 
-        socket.on('join_response', (data) => {
-            document.getElementById('participant-count').textContent = `(${data.count} participants)`;
-        });
 
-        socket.on('hand_position', (data) => {
-            try {
-                if (data.room === room && data.landmarks && data.landmarks.length > 0) {
-                    const hand = data.landmarks[0];
-                    if (!hand || !hand.index || !hand.middle) {
-                        if (data.user_id === socket.id) {
-                            isDrawing = false;
-                            cursor.style.display = 'none';
-                            status.textContent = 'Hand not detected';
-                        } else {
-                            cleanupCursor(data.user_id);
-                        }
+
+        function processHandPosition(data) {
+            console.log('Processing hand position:', data);
+            if (data.landmarks && data.landmarks.length > 0) {
+                const hand = data.landmarks[0];
+                
+                if (data.user_id === socket.id) {
+                    const canvasPos = getCanvasPosition(hand.index.x, hand.index.y);
+                    const isErasing = hand.index_up && hand.middle_up && !hand.pinky_up;
+
+                    status.textContent = isErasing ? 'Erasing mode' : 'Drawing mode';
+
+                    if (!hand.index_up) {
+                        isDrawing = false;
                         return;
                     }
 
-                    const index = hand.index;
-                    const middle = hand.middle;
-
-                    // Get the appropriate cursor for this user
-                    const userCursor = getOrCreateCursor(data.user_id);
-
-                    // Update cursor position
-                    updateCursorPosition(userCursor, index.x, index.y);
-
-                    // Only process drawing for the current user
-                    if (data.user_id === socket.id) {
-                        const canvasPos = getCanvasPosition(index.x, index.y);
-
-                        // Improved Erasing Logic
-                        const isErasing = hand.index_up && hand.middle_up && !hand.pinky_up;
-
-                        status.textContent = isErasing ? 'Erasing mode' : 'Drawing mode';
-
-                        if (!hand.index_up) {
-                            isDrawing = false;
-                            return;
-                        }
-
-
-                        if (!isDrawing) {
-                            isDrawing = true;
-                            lastX = canvasPos.x;
-                            lastY = canvasPos.y;
-                            initializeSmoothedPosition(canvasPos.x, canvasPos.y);
-                            ctx.beginPath();
-                            ctx.moveTo(lastX, lastY);
-                        } else {
-                            const smoothedPos = smoothPosition(canvasPos.x, canvasPos.y);
-
-                            // Set drawing properties here for consistency
-                            ctx.globalCompositeOperation = isErasing ? 'destination-out' : 'source-over';
-                            ctx.lineWidth = isErasing ? 20 : 2; 
-
-                            ctx.lineTo(smoothedPos.x, smoothedPos.y);
-                            ctx.stroke();
-
-                            socket.emit('draw', {
-                                room,
-                                x: smoothedPos.x,
-                                y: smoothedPos.y,
-                                lastX,
-                                lastY,
-                                erase: isErasing
-                            });
-
-                            lastX = smoothedPos.x;
-                            lastY = smoothedPos.y;
-                        }
+                    if (!isDrawing) {
+                        isDrawing = true;
+                        lastX = canvasPos.x;
+                        lastY = canvasPos.y;
+                        initializeSmoothedPosition(canvasPos.x, canvasPos.y);
+                        ctx.beginPath();
+                        ctx.moveTo(lastX, lastY);
                     } else {
-                        // Update cursor position for other users
-                        updateCursorPosition(userCursor, index.x, index.y);
+                        const smoothedPos = smoothPosition(canvasPos.x, canvasPos.y);
+
+                        ctx.globalCompositeOperation = isErasing ? 'destination-out' : 'source-over';
+                        ctx.lineWidth = isErasing ? 20 : 2;
+
+                        ctx.lineTo(smoothedPos.x, smoothedPos.y);
+                        ctx.stroke();
+
+                        // Emit the already-flipped coordinates
+                        socket.emit('draw', {
+                            room,
+                            x: smoothedPos.x,
+                            y: smoothedPos.y,
+                            lastX,
+                            lastY,
+                            erase: isErasing
+                        });
+
+                        lastX = smoothedPos.x;
+                        lastY = smoothedPos.y;
                     }
-                } else {
-                    if (data.user_id === socket.id) {
-                        isDrawing = false;
-                        cursor.style.display = 'none';
-                        status.textContent = 'Hand not detected';
+                }
+            }
+        }
+
+
+
+        // Socket event handlers
+        const socketHandlers = {
+            connect: () => {
+                console.log('Socket connected with sid:', socket.id);
+                document.getElementById('room-id').textContent = room;
+                socket.emit('join', { room });
+            },
+            connect_error: (error) => {
+                console.error('Socket connection error:', error);
+                status.textContent = 'Connection error. Please refresh the page.';
+            },
+            error: (error) => {
+                console.error('Socket error:', error);
+                status.textContent = 'Connection error occurred';
+            },
+            join_response: (data) => {
+                console.log('Join response received:', data);
+                document.getElementById('participant-count').textContent = `(${data.count} participants)`;
+            },
+            hand_position_broadcast: (data) => {
+                if (data.room === room && data.user_id !== socket.id) {
+                    // For other users' cursors, use the flipped coordinates
+                    if (data.landmarks && data.landmarks.length > 0) {
+                        const hand = data.landmarks[0];
+                        const userCursor = getOrCreateCursor(data.user_id);
+                        // Use the same flipping logic as the local user
+                        const x = data.user_id === socket.id ? hand.index.x:1 - hand.index.x; 
+                        updateCursorPosition(userCursor, hand.index.x, hand.index.y);
                     } else {
                         cleanupCursor(data.user_id);
                     }
                 }
-            } catch (error) {
-                console.error('Error processing hand position:', error);
-                status.textContent = 'Error processing hand position';
-            }
-        });
-
-        socket.on('draw_broadcast', (data) => {
-            try {
+            },
+            draw_broadcast: (data) => {
                 if (data.room === room) {
+                    // The coordinates are already flipped by the sender, so use them directly
                     ctx.globalCompositeOperation = data.erase ? 'destination-out' : 'source-over';
                     ctx.lineWidth = data.erase ? 20 : 2;
                     ctx.beginPath();
@@ -335,69 +505,118 @@
                     ctx.lineTo(data.x, data.y);
                     ctx.stroke();
                 }
-            } catch (error) {
-                console.error('Error processing draw broadcast:', error);
+            },
+            clear_broadcast: (data) => {
+                if (data.room === room) {
+                    isDrawing = false;
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                }
+            },
+            user_disconnected: (userId) => {
+                cleanupCursor(userId);
             }
+        };
+
+        // Attach socket handlers
+        Object.entries(socketHandlers).forEach(([event, handler]) => {
+            socket.on(event, handler);
         });
 
-        // Clean up cursors when users leave
-        socket.on('user_disconnected', (userId) => {
-            cleanupCursor(userId);
-        });
-
-        // Clear canvas
+        // Clear canvas button handler
         document.getElementById('clear-canvas').addEventListener('click', () => {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             isDrawing = false;
             socket.emit('clear', { room });
         });
 
-        socket.on('clear_broadcast', (data) => {
-            if (data.room === room) {
-                isDrawing = false;
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-            }
-        });
 
-        // Handle tab/browser close
-        window.addEventListener('beforeunload', () => {
-            socket.disconnect();
-        });
-
-        // Toggle camera
-        document.getElementById('toggle-camera').addEventListener('click', () => {
-            socket.emit('toggle_camera', { room });
-        });
-
-        socket.on('camera_status', (data) => {
-            if (data.user_id === socket.id) {
-                const status = data.status ? 'Camera On' : 'Camera Off';
-                document.getElementById('status').textContent = status;
-                if (!data.status) {
-                    videoFeed.src = '';
+        document.getElementById('toggle-camera').addEventListener('click', async () => {
+            try {
+                if (!isCameraOn) {
+                    status.textContent = 'Starting camera...';
+                    document.querySelector('.camera-status').textContent = 'Starting...';
+                    
+                    if (!hands || !camera) {
+                        const initialized = await initializeMediaPipe();
+                        if (!initialized) {
+                            throw new Error('Failed to initialize camera system');
+                        }
+                    }
+                    
+                    await camera.start();
+                    isCameraOn = true;
+                    status.textContent = 'Camera On';
+                    document.querySelector('.camera-status').textContent = 'Camera On';
+                    console.log('Camera started');
                 } else {
-                    updateVideoFeed();
+                    if (camera) {
+                        camera.stop();
+                    }
+                    isCameraOn = false;
+                    status.textContent = 'Camera Off';
+                    document.querySelector('.camera-status').textContent = 'Camera Off';
+                    console.log('Camera stopped');
                 }
+            } catch (error) {
+                console.error('Error toggling camera:', error);
+                status.textContent = 'Error with camera: ' + error.message;
+                document.querySelector('.camera-status').textContent = 'Camera Error';
+                isCameraOn = false;
             }
+        });
+
+        // Add window resize handler
+        window.addEventListener('resize', initCanvas);
+        // Initialize application
+        window.addEventListener('load', async () => {
+            try {
+                console.log('Initializing application...');
+                
+                // Initialize canvas first
+                if (!initCanvas()) {
+                    throw new Error('Canvas initialization failed');
+                }
+
+                // Initialize MediaPipe early
+                await initializeMediaPipe();
+
+                // Set up room
+                document.getElementById('room-id').textContent = room;
+                console.log('Room ID:', room);
+                
+                // Connect to socket
+                socket.emit('join', { room });
+                
+                // Add resize handler
+                window.addEventListener('resize', () => {
+                    console.log('Window resized, reinitializing canvas...');
+                    initCanvas();
+                });
+                
+                console.log('Application initialized successfully');
+            } catch (error) {
+                console.error('Error initializing application:', error);
+                status.textContent = 'Error initializing application: ' + error.message;
+            }
+        });
+
+        window.addEventListener('beforeunload', () => {
+            if (camera) {
+                camera.stop();
+            }
+            socket.disconnect();
         });
 
         // New room
         document.getElementById('new-room').addEventListener('click', () => {
+            if (camera) {
+                camera.stop();
+            }
             socket.emit('leave', { room });
             window.location.hash = Math.random().toString(36).substring(7);
             location.reload();
         });
 
-        // Error handling for socket connection
-        socket.on('connect_error', (error) => {
-            console.error('Connection error:', error);
-            status.textContent = 'Connection error. Please refresh the page.';
-        });
-
-        socket.on('error', (error) => {
-            console.error('Socket error:', error);
-            status.textContent = 'Error occurred. Please refresh the page.';
-        });
 
         // Prevent scrolling when touching the canvas
         canvas.addEventListener('touchstart', (e) => e.preventDefault());
@@ -447,5 +666,6 @@
             mouseDrawing = false;
         });
     </script>
+
 </body>
 </html>
