@@ -245,6 +245,67 @@
         let lastX = 0;
         let lastY = 0;
         let room = window.location.hash.slice(1) || Math.random().toString(36).substring(7);
+        let drawingHistory = [];
+        const maxHistoryLength = 1000; // Limit history length to prevent memory issues
+
+        // Function to save drawing state
+        function saveDrawingState(data) {
+            // Ensure we're not duplicating points that are too close together
+            const lastPoint = drawingHistory[drawingHistory.length - 1];
+            if (lastPoint) {
+                const distance = Math.sqrt(
+                    Math.pow(data.x - lastPoint.x, 2) + 
+                    Math.pow(data.y - lastPoint.y, 2)
+                );
+                
+                // Skip points that are too close together (less than 1 pixel apart)
+                if (distance < 1) return;
+            }
+            
+            drawingHistory.push(data);
+            if (drawingHistory.length > maxHistoryLength) {
+                // Remove points in chunks to prevent frequent array shifts
+                drawingHistory = drawingHistory.slice(-Math.floor(maxHistoryLength * 0.8));
+            }
+        }
+
+        // Function to restore drawing
+        function restoreDrawing() {
+            if (drawingHistory.length === 0) return;
+            
+            try {
+                const currentGlobalComposite = ctx.globalCompositeOperation;
+                const currentLineWidth = ctx.lineWidth;
+                
+                ctx.beginPath();
+                drawingHistory.forEach((data, index) => {
+                    if (!data || typeof data.x === 'undefined' || typeof data.y === 'undefined') {
+                        console.warn('Invalid drawing data found:', data);
+                        return;
+                    }
+                    
+                    if (index === 0) {
+                        ctx.moveTo(data.x, data.y);
+                    } else {
+                        ctx.globalCompositeOperation = data.erase ? 'destination-out' : 'source-over';
+                        ctx.lineWidth = data.erase ? 20 : 2;
+                        ctx.lineTo(data.x, data.y);
+                        ctx.stroke();
+                        ctx.beginPath();
+                        ctx.moveTo(data.x, data.y);
+                    }
+                });
+                
+                // Restore original context settings
+                ctx.globalCompositeOperation = currentGlobalComposite;
+                ctx.lineWidth = currentLineWidth;
+            } catch (error) {
+                console.error('Error restoring drawing:', error);
+                // If restoration fails, clear the canvas and history
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                drawingHistory = [];
+            }
+        }
         window.location.hash = room;
         
         // DOM Elements
@@ -537,7 +598,12 @@
             connect: () => {
                 console.log('Socket connected with sid:', socket.id);
                 document.getElementById('room-id').textContent = room;
+                
+                // Join room and request drawing history on reconnection
                 socket.emit('join', { room });
+                
+                // Update connection status
+                status.textContent = 'Connected';
             },
             connect_error: (error) => {
                 console.error('Socket connection error:', error);
@@ -547,9 +613,55 @@
                 console.error('Socket error:', error);
                 status.textContent = 'Connection error occurred';
             },
+            disconnect: () => {
+                console.log('Socket disconnected');
+                status.textContent = 'Disconnected - Trying to reconnect...';
+            },
+            reconnect: () => {
+                console.log('Socket reconnected');
+                // Request latest drawing history after reconnection
+                socket.emit('request_drawing_history', { room });
+                status.textContent = 'Reconnected';
+            },
+            reconnect_attempt: () => {
+                status.textContent = 'Attempting to reconnect...';
+            },
+            reconnect_error: (error) => {
+                console.error('Reconnection error:', error);
+                status.textContent = 'Reconnection failed - Please refresh the page';
+            },
             join_response: (data) => {
                 console.log('Join response received:', data);
                 document.getElementById('participant-count').textContent = `(${data.count} participants)`;
+                
+                // Request drawing history from other users
+                if (data.count > 1) {
+                    socket.emit('request_drawing_history', { room });
+                }
+            },
+            request_drawing_history: (data) => {
+                if (data.room === room) {
+                    // Send our drawing history to the new user
+                    socket.emit('drawing_history', {
+                        room,
+                        history: drawingHistory
+                    });
+                }
+            },
+            drawing_history: (data) => {
+                if (data.room === room && data.history) {
+                    // Clear existing drawing and history
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    drawingHistory = [];
+                    
+                    // Apply received history
+                    data.history.forEach(item => {
+                        drawingHistory.push(item);
+                    });
+                    
+                    // Restore the drawing
+                    restoreDrawing();
+                }
             },
             hand_position_broadcast: (data) => {
                 if (data.room === room && data.user_id !== socket.id) {
@@ -567,6 +679,12 @@
             },
             draw_broadcast: (data) => {
                 if (data.room === room) {
+                    saveDrawingState({
+                        x: data.x,
+                        y: data.y,
+                        erase: data.erase
+                    });
+                    
                     // The coordinates are already flipped by the sender, so use them directly
                     ctx.globalCompositeOperation = data.erase ? 'destination-out' : 'source-over';
                     ctx.lineWidth = data.erase ? 20 : 2;
@@ -579,6 +697,7 @@
             clear_broadcast: (data) => {
                 if (data.room === room) {
                     isDrawing = false;
+                    drawingHistory = []; // Clear history when receiving clear broadcast
                     ctx.clearRect(0, 0, canvas.width, canvas.height);
                 }
             },
@@ -595,6 +714,7 @@
         // Clear canvas button handler
         document.getElementById('clear-canvas').addEventListener('click', () => {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
+            drawingHistory = []; // Clear history when canvas is cleared
             isDrawing = false;
             socket.emit('clear', { room });
         });
@@ -639,6 +759,9 @@
             const containerWidth = container.clientWidth;
             const containerHeight = containerWidth * (3/4); // maintain 4:3 aspect ratio
             
+            // Store the drawing history before resize
+            const tempHistory = [...drawingHistory];
+            
             canvas.width = containerWidth;
             canvas.height = containerHeight;
             
@@ -647,11 +770,18 @@
             ctx.lineWidth = 2;
             ctx.lineCap = 'round';
             ctx.lineJoin = 'round';
+            
+            // Restore the drawing
+            drawingHistory = tempHistory;
+            restoreDrawing();
         }
 
         window.addEventListener('load', async () => {
             try {
                 console.log('Initializing application...');
+                
+                // Try to recover drawing state
+                recoverDrawingState();
                 
                 // Initialize canvas and handle resize
                 resizeCanvas();
@@ -702,6 +832,39 @@
             }
         });
 
+        // Add backup interval and last backup time tracking
+        let lastBackupTime = Date.now();
+        const BACKUP_INTERVAL = 5000; // 5 seconds
+
+        function backupDrawingState() {
+            const currentTime = Date.now();
+            if (currentTime - lastBackupTime >= BACKUP_INTERVAL && drawingHistory.length > 0) {
+                try {
+                    localStorage.setItem(`drawing_backup_${room}`, JSON.stringify(drawingHistory));
+                    lastBackupTime = currentTime;
+                } catch (error) {
+                    console.warn('Failed to backup drawing state:', error);
+                }
+            }
+        }
+
+        // Add drawing state recovery from backup
+        function recoverDrawingState() {
+            try {
+                const backup = localStorage.getItem(`drawing_backup_${room}`);
+                if (backup) {
+                    const recoveredHistory = JSON.parse(backup);
+                    if (Array.isArray(recoveredHistory) && recoveredHistory.length > 0) {
+                        drawingHistory = recoveredHistory;
+                        restoreDrawing();
+                        console.log('Recovered drawing state from backup');
+                    }
+                }
+            } catch (error) {
+                console.error('Failed to recover drawing state:', error);
+            }
+        }
+
         // Add performance optimizations for the drawing functions
         function optimizedDraw(points, isErasing = false) {
             if (points.length < 2) return;
@@ -713,8 +876,16 @@
                 
                 for (let i = 1; i < points.length; i++) {
                     ctx.lineTo(points[i].x, points[i].y);
+                    saveDrawingState({
+                        x: points[i].x,
+                        y: points[i].y,
+                        erase: isErasing
+                    });
                 }
                 ctx.stroke();
+                
+                // Backup drawing state periodically
+                backupDrawingState();
             });
         }
 
