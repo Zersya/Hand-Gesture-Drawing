@@ -224,18 +224,38 @@
 
         // Smoothing parameters
         const smoothingFactor = 0.85;
-        let smoothedX = 0;
-        let smoothedY = 0;
+        const pointsQueue = [];
+        const maxPoints = 5;
 
-        function initializeSmoothedPosition(x, y) {
-            smoothedX = x;
-            smoothedY = y;
+        function addPoint(x, y) {
+            pointsQueue.push({ x, y });
+            if (pointsQueue.length > maxPoints) {
+                pointsQueue.shift();
+            }
         }
 
-        function smoothPosition(x, y) {
-            smoothedX = smoothingFactor * x + (1 - smoothingFactor) * smoothedX;
-            smoothedY = smoothingFactor * y + (1 - smoothingFactor) * smoothedY;
-            return { x: smoothedX, y: smoothedY };
+        function getBezierPoint(points, t) {
+            if (points.length < 2) return points[0];
+            
+            const newPoints = [];
+            for (let i = 0; i < points.length - 1; i++) {
+                newPoints.push({
+                    x: points[i].x + (points[i + 1].x - points[i].x) * t,
+                    y: points[i].y + (points[i + 1].y - points[i].y) * t
+                });
+            }
+            
+            return getBezierPoint(newPoints, t);
+        }
+
+        function smoothPath(points) {
+            if (points.length < 2) return points[0];
+            
+            const smoothedPoints = [];
+            for (let t = 0; t <= 1; t += 0.1) {
+                smoothedPoints.push(getBezierPoint(points, t));
+            }
+            return smoothedPoints;
         }
 
         async function initializeMediaPipe() {
@@ -412,7 +432,6 @@
 
 
         function processHandPosition(data) {
-            console.log('Processing hand position:', data);
             if (data.landmarks && data.landmarks.length > 0) {
                 const hand = data.landmarks[0];
                 
@@ -424,6 +443,7 @@
 
                     if (!hand.index_up) {
                         isDrawing = false;
+                        pointsQueue.length = 0;
                         return;
                     }
 
@@ -431,30 +451,40 @@
                         isDrawing = true;
                         lastX = canvasPos.x;
                         lastY = canvasPos.y;
-                        initializeSmoothedPosition(canvasPos.x, canvasPos.y);
+                        pointsQueue.length = 0;
+                        addPoint(canvasPos.x, canvasPos.y);
                         ctx.beginPath();
                         ctx.moveTo(lastX, lastY);
                     } else {
-                        const smoothedPos = smoothPosition(canvasPos.x, canvasPos.y);
-
-                        ctx.globalCompositeOperation = isErasing ? 'destination-out' : 'source-over';
-                        ctx.lineWidth = isErasing ? 20 : 2;
-
-                        ctx.lineTo(smoothedPos.x, smoothedPos.y);
-                        ctx.stroke();
-
-                        // Emit the already-flipped coordinates
-                        socket.emit('draw', {
-                            room,
-                            x: smoothedPos.x,
-                            y: smoothedPos.y,
-                            lastX,
-                            lastY,
-                            erase: isErasing
-                        });
-
-                        lastX = smoothedPos.x;
-                        lastY = smoothedPos.y;
+                        addPoint(canvasPos.x, canvasPos.y);
+                        
+                        if (pointsQueue.length >= 2) {
+                            const smoothedPoints = smoothPath(pointsQueue);
+                            
+                            ctx.globalCompositeOperation = isErasing ? 'destination-out' : 'source-over';
+                            ctx.lineWidth = isErasing ? 20 : 2;
+                            
+                            ctx.beginPath();
+                            ctx.moveTo(lastX, lastY);
+                            
+                            for (const point of smoothedPoints) {
+                                ctx.lineTo(point.x, point.y);
+                                
+                                // Emit the smoothed coordinates
+                                socket.emit('draw', {
+                                    room,
+                                    x: point.x,
+                                    y: point.y,
+                                    lastX,
+                                    lastY,
+                                    erase: isErasing
+                                });
+                                
+                                lastX = point.x;
+                                lastY = point.y;
+                            }
+                            ctx.stroke();
+                        }
                     }
                 }
             }
@@ -631,6 +661,8 @@
             const rect = canvas.getBoundingClientRect();
             lastX = (e.clientX - rect.left) * (canvas.width / rect.width);
             lastY = (e.clientY - rect.top) * (canvas.height / rect.height);
+            pointsQueue.length = 0;
+            addPoint(lastX, lastY);
             ctx.beginPath();
             ctx.moveTo(lastX, lastY);
         });
@@ -640,30 +672,43 @@
                 const rect = canvas.getBoundingClientRect();
                 const x = (e.clientX - rect.left) * (canvas.width / rect.width);
                 const y = (e.clientY - rect.top) * (canvas.height / rect.height);
-
-                ctx.lineTo(x, y);
-                ctx.stroke();
-
-                socket.emit('draw', {
-                    room,
-                    x,
-                    y,
-                    lastX,
-                    lastY,
-                    erase: false
-                });
-
-                lastX = x;
-                lastY = y;
+                
+                addPoint(x, y);
+                
+                if (pointsQueue.length >= 2) {
+                    const smoothedPoints = smoothPath(pointsQueue);
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(lastX, lastY);
+                    
+                    for (const point of smoothedPoints) {
+                        ctx.lineTo(point.x, point.y);
+                        
+                        socket.emit('draw', {
+                            room,
+                            x: point.x,
+                            y: point.y,
+                            lastX,
+                            lastY,
+                            erase: false
+                        });
+                        
+                        lastX = point.x;
+                        lastY = point.y;
+                    }
+                    ctx.stroke();
+                }
             }
         });
 
         canvas.addEventListener('mouseup', () => {
             mouseDrawing = false;
+            pointsQueue.length = 0;
         });
 
         canvas.addEventListener('mouseleave', () => {
             mouseDrawing = false;
+            pointsQueue.length = 0;
         });
     </script>
 
