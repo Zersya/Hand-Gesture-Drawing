@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
     <title>Hand Gesture Drawing</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
@@ -12,40 +14,39 @@
         body {
             font-family: 'Arial', sans-serif;
             margin: 0;
-            padding: 20px;
+            padding: 10px;
             background-color: #f0f2f5;
             display: flex;
             flex-direction: column;
             align-items: center;
+            min-height: 100vh;
+            overscroll-behavior: none;
         }
         .container {
-            max-width: 1200px;
+            max-width: 100%;
             width: 100%;
             background: white;
-            padding: 20px;
+            padding: 10px;
             border-radius: 10px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            box-sizing: border-box;
         }
         .workspace {
             display: flex;
-            gap: 20px;
-            margin-top: 20px;
-            justify-content: center;
-            align-items: flex-start;
+            flex-direction: column;
+            gap: 10px;
+            margin-top: 10px;
+            align-items: center;
         }
-        .video-container {
-            flex: 1;
-            position: relative;
+        .video-container, .canvas-container {
+            width: 100%;
             max-width: 480px;
-        }
-        .canvas-container {
-            flex: 1;
             position: relative;
-            max-width: 480px;
         }
         #video-feed {
             width: 100%;
-            height: 100%;
+            height: auto;
+            aspect-ratio: 4/3;
             transform: scaleX(-1);
             border-radius: 8px;
             background-color: #000;
@@ -85,7 +86,8 @@
 
         #drawing-canvas {
             width: 100%;
-            height: 360px;
+            height: auto;
+            aspect-ratio: 4/3;
             background: #fff;
             border: 1px solid #ddd;
             border-radius: 8px;
@@ -93,19 +95,57 @@
             touch-action: none;
         }
         .controls {
-            margin-top: 20px;
-            display: flex;
-            gap: 10px;
-            justify-content: center;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+            gap: 8px;
+            width: 100%;
+            margin-top: 10px;
         }
         button {
-            padding: 10px 20px;
+            padding: 12px 20px;
             border: none;
-            border-radius: 5px;
+            border-radius: 8px;
             background-color: #1a73e8;
             color: white;
             cursor: pointer;
             transition: background-color 0.3s;
+            font-size: 14px;
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
+        }
+        @media (max-width: 768px) {
+            body {
+                padding: 5px;
+            }
+            .container {
+                padding: 8px;
+            }
+            h1 {
+                font-size: 1.5rem;
+                margin: 10px 0;
+                text-align: center;
+            }
+            .workspace {
+                gap: 8px;
+            }
+            .controls {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            .room-info {
+                font-size: 12px;
+            }
+            #drawing-canvas, #video-feed {
+                border-radius: 6px;
+            }
+        }
+        @media (max-width: 480px) {
+            .controls {
+                grid-template-columns: 1fr;
+            }
+            button {
+                padding: 10px 16px;
+                font-size: 13px;
+            }
         }
         button:hover {
             background-color: #1557b0;
@@ -594,15 +634,27 @@
                 isCameraOn = false;
             }
         });
+        function resizeCanvas() {
+            const container = canvas.parentElement;
+            const containerWidth = container.clientWidth;
+            const containerHeight = containerWidth * (3/4); // maintain 4:3 aspect ratio
+            
+            canvas.width = containerWidth;
+            canvas.height = containerHeight;
+            
+            // Reset canvas properties after resize
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 2;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+        }
 
-        // Add window resize handler
-        window.addEventListener('resize', initCanvas);
-        // Initialize application
         window.addEventListener('load', async () => {
             try {
                 console.log('Initializing application...');
                 
-                // Initialize canvas first
+                // Initialize canvas and handle resize
+                resizeCanvas();
                 if (!initCanvas()) {
                     throw new Error('Canvas initialization failed');
                 }
@@ -617,11 +669,31 @@
                 // Connect to socket
                 socket.emit('join', { room });
                 
-                // Add resize handler
+                // Add resize handler with debounce
+                let resizeTimeout;
                 window.addEventListener('resize', () => {
-                    console.log('Window resized, reinitializing canvas...');
-                    initCanvas();
+                    clearTimeout(resizeTimeout);
+                    resizeTimeout = setTimeout(() => {
+                        console.log('Window resized, reinitializing canvas...');
+                        resizeCanvas();
+                    }, 250);
                 });
+                
+                // Add orientation change handler for mobile devices
+                window.addEventListener('orientationchange', () => {
+                    setTimeout(resizeCanvas, 100);
+                });
+                
+                // Optimize touch handling
+                if ('ontouchstart' in window) {
+                    canvas.style.touchAction = 'none';
+                    document.body.style.overscrollBehavior = 'none';
+                    
+                    // Prevent default touch actions on the canvas
+                    canvas.addEventListener('touchstart', (e) => e.preventDefault(), { passive: false });
+                    canvas.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+                    canvas.addEventListener('touchend', (e) => e.preventDefault(), { passive: false });
+                }
                 
                 console.log('Application initialized successfully');
             } catch (error) {
@@ -629,6 +701,22 @@
                 status.textContent = 'Error initializing application: ' + error.message;
             }
         });
+
+        // Add performance optimizations for the drawing functions
+        function optimizedDraw(points, isErasing = false) {
+            if (points.length < 2) return;
+            
+            requestAnimationFrame(() => {
+                ctx.globalCompositeOperation = isErasing ? 'destination-out' : 'source-over';
+                ctx.beginPath();
+                ctx.moveTo(points[0].x, points[0].y);
+                
+                for (let i = 1; i < points.length; i++) {
+                    ctx.lineTo(points[i].x, points[i].y);
+                }
+                ctx.stroke();
+            });
+        }
 
         window.addEventListener('beforeunload', () => {
             if (camera) {
@@ -709,6 +797,84 @@
         canvas.addEventListener('mouseleave', () => {
             mouseDrawing = false;
             pointsQueue.length = 0;
+        });
+
+        // Add touch event handlers
+        let touchDrawing = false;
+        let lastTouch = null;
+
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            touchDrawing = true;
+            const rect = canvas.getBoundingClientRect();
+            const touch = e.touches[0];
+            lastX = (touch.clientX - rect.left) * (canvas.width / rect.width);
+            lastY = (touch.clientY - rect.top) * (canvas.height / rect.height);
+            lastTouch = { x: lastX, y: lastY };
+            
+            pointsQueue.length = 0;
+            addPoint(lastX, lastY);
+            ctx.beginPath();
+            ctx.moveTo(lastX, lastY);
+        });
+
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            if (touchDrawing) {
+                const rect = canvas.getBoundingClientRect();
+                const touch = e.touches[0];
+                const x = (touch.clientX - rect.left) * (canvas.width / rect.width);
+                const y = (touch.clientY - rect.top) * (canvas.height / rect.height);
+                
+                // Calculate speed of movement for dynamic line width
+                const speed = lastTouch ? Math.sqrt(
+                    Math.pow(x - lastTouch.x, 2) + 
+                    Math.pow(y - lastTouch.y, 2)
+                ) : 0;
+                
+                // Adjust line width based on speed (thinner for faster movements)
+                const baseWidth = 2;
+                const speedFactor = Math.max(0.5, 1 - speed / 100);
+                ctx.lineWidth = baseWidth * speedFactor;
+                
+                addPoint(x, y);
+                
+                if (pointsQueue.length >= 2) {
+                    const smoothedPoints = smoothPath(pointsQueue);
+                    optimizedDraw(smoothedPoints, false);
+                    
+                    // Emit the last point for real-time collaboration
+                    const lastPoint = smoothedPoints[smoothedPoints.length - 1];
+                    socket.emit('draw', {
+                        room,
+                        x: lastPoint.x,
+                        y: lastPoint.y,
+                        lastX,
+                        lastY,
+                        erase: false
+                    });
+                    
+                    lastX = lastPoint.x;
+                    lastY = lastPoint.y;
+                }
+                
+                lastTouch = { x, y };
+            }
+        });
+
+
+        canvas.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            touchDrawing = false;
+            pointsQueue.length = 0;
+            lastTouch = null;
+        });
+
+        canvas.addEventListener('touchcancel', (e) => {
+            e.preventDefault();
+            touchDrawing = false;
+            pointsQueue.length = 0;
+            lastTouch = null;
         });
     </script>
 
